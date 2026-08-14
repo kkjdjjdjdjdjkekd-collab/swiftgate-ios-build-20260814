@@ -1,0 +1,51 @@
+name: Build SwiftGate unsigned IPA
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 180
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      SWIFTGATE_APPLE_REF: b1daf888efa6a5b80d668257ba540e600384d626
+      SWIFTGATE_CORE_REF: 3e16ce764818796996c1be3f12b0c6008808cf34
+      SWIFTGATE_LIBBOX_PLATFORMS: ios
+    steps:
+      - name: Check out build payload
+        uses: actions/checkout@v7
+
+      - name: Select Go toolchain
+        uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.5
+          cache: false
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Extract verified SwiftGate source
+        run: unzip -q SwiftGate-iOS-0.2.0-CI-Ready.zip -d SwiftGate-iOS
+
+      - name: Build native core and unsigned IPA
+        working-directory: SwiftGate-iOS
+        run: bash Scripts/build-unsigned-ipa.sh
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v7
+        with:
+          name: SwiftGate-Unsigned-IPA
+          path: |
+            SwiftGate-iOS/.build/artifacts/SwiftGate-Unsigned.ipa
+            SwiftGate-iOS/.build/artifacts/SwiftGate-Unsigned.ipa.sha256
+            SwiftGate-iOS/.build/artifacts/Build-Info.txt
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
