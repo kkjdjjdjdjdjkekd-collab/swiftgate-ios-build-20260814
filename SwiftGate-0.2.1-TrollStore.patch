@@ -1,0 +1,920 @@
+diff --git "a/.github/workflows/build-unsigned-ipa.yml" "b/.github/workflows/build-unsigned-ipa.yml"
+index 8e2e3c6..cb1fd5b 100644
+--- "a/.github/workflows/build-unsigned-ipa.yml"
++++ "b/.github/workflows/build-unsigned-ipa.yml"
+@@ -1,4 +1,4 @@
+-name: Build unsigned iPhone IPA
++name: Build TrollStore iPhone IPA
+ 
+ on:
+   workflow_dispatch:
+@@ -43,16 +43,16 @@ jobs:
+           go version
+           xcodegen --version
+ 
+-      - name: Build native core and unsigned IPA
++      - name: Build native core and TrollStore IPA
+         run: bash Scripts/build-unsigned-ipa.sh
+ 
+-      - name: Upload unsigned IPA
++      - name: Upload TrollStore IPA
+         uses: actions/upload-artifact@v7
+         with:
+-          name: SwiftGate-Unsigned-IPA
++          name: SwiftGate-TrollStore-IPA
+           path: |
+-            .build/artifacts/SwiftGate-Unsigned.ipa
+-            .build/artifacts/SwiftGate-Unsigned.ipa.sha256
++            .build/artifacts/SwiftGate-TrollStore.ipa
++            .build/artifacts/SwiftGate-TrollStore.ipa.sha256
+             .build/artifacts/Build-Info.txt
+           if-no-files-found: error
+           retention-days: 14
+diff --git "a/App/AppModel.swift" "b/App/AppModel.swift"
+index 69d0b18..497ca11 100644
+--- "a/App/AppModel.swift"
++++ "b/App/AppModel.swift"
+@@ -1,9 +1,8 @@
+ import Foundation
+-import Observation
++import Combine
+ 
+ @MainActor
+-@Observable
+-final class AppModel {
++final class AppModel: ObservableObject {
+     private let store: AtomicConfigurationStore
+     private let tunnel: TunnelManager
+     private let importService: ImportService
+@@ -11,6 +10,7 @@ final class AppModel {
+     private let runtimeBuilder: RuntimeConfigBuilder
+     private let keychain: KeychainStore
+     private let diagnostics: DiagnosticService
++    private var tunnelObservation: AnyCancellable?
+ 
+     private var initialized = false
+     private var settingsRevision = 0
+@@ -18,14 +18,14 @@ final class AppModel {
+     private var subscriptionTask: Task<Void, Never>?
+     private var consecutiveHealthFailures = 0
+ 
+-    var nodes: [ProxyNode] = []
+-    var settings = AppSettings()
+-    var importText = ""
+-    var importSummary: String?
+-    var diagnosticItems: [DiagnosticItem] = []
+-    var diagnosticExportURL: URL?
+-    var notice: String?
+-    private(set) var isUpdatingSubscription = false
++    @Published var nodes: [ProxyNode] = []
++    @Published var settings = AppSettings()
++    @Published var importText = ""
++    @Published var importSummary: String?
++    @Published var diagnosticItems: [DiagnosticItem] = []
++    @Published var diagnosticExportURL: URL?
++    @Published var notice: String?
++    @Published private(set) var isUpdatingSubscription = false
+ 
+     var connectionState: VPNConnectionState { tunnel.state }
+     var connectionStatusText: String { tunnel.statusMessage }
+@@ -59,11 +59,17 @@ final class AppModel {
+         self.runtimeBuilder = runtimeBuilder
+         self.keychain = keychain
+         self.diagnostics = diagnostics
++        tunnelObservation = tunnel.objectWillChange.sink { [weak self] _ in
++            self?.objectWillChange.send()
++        }
+     }
+ 
+     func initialize() async {
+         guard !initialized else { return }
+         initialized = true
++        let signingNotice = AppConfiguration.isSharedContainerAvailable
++            ? nil
++            : "当前签名没有 App Group 权限，SwiftGate 已改用本机存储，因此不会再闪退；VPN 隧道仍需要签名工具保留 Network Extension 和 App Group 权限。"
+         do {
+             var configuration = try await store.load()
+             if let id = configuration.settings.preferredNodeID,
+@@ -83,6 +89,9 @@ final class AppModel {
+             notice = "读取配置失败：\(Redactor.clean(error.localizedDescription))"
+         }
+         await tunnel.load()
++        if notice == nil {
++            notice = signingNotice
++        }
+         restartHealthMonitor()
+         restartSubscriptionMonitor()
+     }
+@@ -319,7 +328,7 @@ final class AppModel {
+         guard settings.autoSwitchEnabled else { return }
+         healthTask = Task { [weak self] in
+             while !Task.isCancelled {
+-                do { try await Task.sleep(for: .seconds(30)) }
++                do { try await Task.sleep(nanoseconds: 30_000_000_000) }
+                 catch { return }
+                 guard let self else { return }
+                 await self.runHealthCheck()
+@@ -334,7 +343,7 @@ final class AppModel {
+         subscriptionTask = Task { [weak self] in
+             await self?.refreshSubscription(showSuccessNotice: false, onlyWhenDue: true)
+             while !Task.isCancelled {
+-                do { try await Task.sleep(for: .seconds(15 * 60)) }
++                do { try await Task.sleep(nanoseconds: 900_000_000_000) }
+                 catch { return }
+                 guard let self else { return }
+                 await self.refreshSubscription(showSuccessNotice: false, onlyWhenDue: true)
+@@ -379,7 +388,7 @@ final class AppModel {
+         }
+ 
+         do {
+-            _ = try await latency.testCurrentTunnel(timeout: .seconds(7))
++            _ = try await latency.testCurrentTunnel(timeout: 7)
+             consecutiveHealthFailures = 0
+             return
+         } catch {
+diff --git "a/App/RootTabView.swift" "b/App/RootTabView.swift"
+index 7b2bfda..eafcf6e 100644
+--- "a/App/RootTabView.swift"
++++ "b/App/RootTabView.swift"
+@@ -9,38 +9,42 @@ enum AppTab: Hashable {
+ 
+ @MainActor
+ struct RootTabView: View {
+-    @Environment(AppModel.self) private var model
++    @EnvironmentObject private var model: AppModel
+     @State private var selectedTab: AppTab = .home
+ 
+     var body: some View {
+         TabView(selection: $selectedTab) {
+-            NavigationStack {
++            NavigationView {
+                 HomeView()
+             }
++            .navigationViewStyle(.stack)
+             .tabItem {
+                 Label("首页", systemImage: "house.fill")
+             }
+             .tag(AppTab.home)
+ 
+-            NavigationStack {
++            NavigationView {
+                 NodesView()
+             }
++            .navigationViewStyle(.stack)
+             .tabItem {
+                 Label("节点", systemImage: "point.3.connected.trianglepath.dotted")
+             }
+             .tag(AppTab.nodes)
+ 
+-            NavigationStack {
++            NavigationView {
+                 ImportView()
+             }
++            .navigationViewStyle(.stack)
+             .tabItem {
+                 Label("导入", systemImage: "square.and.arrow.down")
+             }
+             .tag(AppTab.importContent)
+ 
+-            NavigationStack {
++            NavigationView {
+                 SettingsView()
+             }
++            .navigationViewStyle(.stack)
+             .tabItem {
+                 Label("设置", systemImage: "gearshape.fill")
+             }
+@@ -61,6 +65,6 @@ struct RootTabView: View {
+                 .zIndex(10)
+             }
+         }
+-        .animation(.snappy, value: model.notice != nil)
++        .animation(.easeInOut(duration: 0.2), value: model.notice != nil)
+     }
+ }
+diff --git "a/App/SwiftGateApp.swift" "b/App/SwiftGateApp.swift"
+index f4831cb..1e206f2 100644
+--- "a/App/SwiftGateApp.swift"
++++ "b/App/SwiftGateApp.swift"
+@@ -3,12 +3,12 @@ import SwiftUI
+ @main
+ @MainActor
+ struct SwiftGateApp: App {
+-    @State private var model = AppModel()
++    @StateObject private var model = AppModel()
+ 
+     var body: some Scene {
+         WindowGroup {
+             RootTabView()
+-                .environment(model)
++                .environmentObject(model)
+         }
+     }
+ }
+diff --git "a/Config/AppConfiguration.swift" "b/Config/AppConfiguration.swift"
+index e3382bd..9729352 100644
+--- "a/Config/AppConfiguration.swift"
++++ "b/Config/AppConfiguration.swift"
+@@ -17,12 +17,33 @@ enum AppConfiguration {
+     static let settingsFile = "settings.json"
+     static let tunnelStateFile = "tunnel-state.json"
+ 
+-    static var sharedContainerURL: URL {
+-        guard let url = FileManager.default.containerURL(
++    static var sharedContainerURL: URL? {
++        FileManager.default.containerURL(
+             forSecurityApplicationGroupIdentifier: appGroupIdentifier
+-        ) else {
+-            preconditionFailure("App Group is unavailable. Check signing and entitlements.")
++        )
++    }
++
++    static var isSharedContainerAvailable: Bool {
++        sharedContainerURL != nil
++    }
++
++    /// TrollStore and ad-hoc signing tools may strip or rewrite the App Group
++    /// entitlement. The main app must still be able to launch so it can explain
++    /// the missing capability instead of terminating before the first screen.
++    static var storageContainerURL: URL {
++        if let sharedContainerURL {
++            return sharedContainerURL
+         }
+-        return url
++
++        let baseURL = FileManager.default.urls(
++            for: .applicationSupportDirectory,
++            in: .userDomainMask
++        ).first ?? FileManager.default.temporaryDirectory
++        let fallbackURL = baseURL.appendingPathComponent("SwiftGate", isDirectory: true)
++        try? FileManager.default.createDirectory(
++            at: fallbackURL,
++            withIntermediateDirectories: true
++        )
++        return fallbackURL
+     }
+ }
+diff --git "a/.\\ios/Config/PacketTunnel-TrollStore.entitlements" "b/Config/PacketTunnel-TrollStore.entitlements"
+new file mode 100644
+index 0000000..c362562
+--- /dev/null
++++ "b/Config/PacketTunnel-TrollStore.entitlements"
+@@ -0,0 +1,23 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++    <key>application-identifier</key>
++    <string>TROLLTROLL.*</string>
++    <key>com.apple.developer.team-identifier</key>
++    <string>TROLLTROLL</string>
++    <key>keychain-access-groups</key>
++    <array>
++        <string>TROLLTROLL.*</string>
++        <string>com.apple.token</string>
++    </array>
++    <key>com.apple.developer.networking.networkextension</key>
++    <array>
++        <string>packet-tunnel-provider</string>
++    </array>
++    <key>com.apple.security.application-groups</key>
++    <array>
++        <string>group.com.swiftgate.shared</string>
++    </array>
++</dict>
++</plist>
+diff --git "a/.\\ios/Config/SwiftGate-TrollStore.entitlements" "b/Config/SwiftGate-TrollStore.entitlements"
+new file mode 100644
+index 0000000..c362562
+--- /dev/null
++++ "b/Config/SwiftGate-TrollStore.entitlements"
+@@ -0,0 +1,23 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++    <key>application-identifier</key>
++    <string>TROLLTROLL.*</string>
++    <key>com.apple.developer.team-identifier</key>
++    <string>TROLLTROLL</string>
++    <key>keychain-access-groups</key>
++    <array>
++        <string>TROLLTROLL.*</string>
++        <string>com.apple.token</string>
++    </array>
++    <key>com.apple.developer.networking.networkextension</key>
++    <array>
++        <string>packet-tunnel-provider</string>
++    </array>
++    <key>com.apple.security.application-groups</key>
++    <array>
++        <string>group.com.swiftgate.shared</string>
++    </array>
++</dict>
++</plist>
+diff --git "a/Features/Diagnostics/DiagnosticsView.swift" "b/Features/Diagnostics/DiagnosticsView.swift"
+index 1e147e3..e998078 100644
+--- "a/Features/Diagnostics/DiagnosticsView.swift"
++++ "b/Features/Diagnostics/DiagnosticsView.swift"
+@@ -2,8 +2,9 @@ import SwiftUI
+ 
+ @MainActor
+ struct DiagnosticsView: View {
+-    @Environment(AppModel.self) private var model
++    @EnvironmentObject private var model: AppModel
+     @State private var isRunning = false
++    @State private var isSharing = false
+ 
+     var body: some View {
+         List {
+@@ -22,8 +23,10 @@ struct DiagnosticsView: View {
+                 }
+                 .disabled(isRunning)
+ 
+-                if let url = model.diagnosticExportURL, !isRunning {
+-                    ShareLink(item: url) {
++                if model.diagnosticExportURL != nil, !isRunning {
++                    Button {
++                        isSharing = true
++                    } label: {
+                         Label("导出脱敏诊断包", systemImage: "square.and.arrow.up")
+                             .frame(minHeight: SwiftGateTheme.minimumTapHeight)
+                     }
+@@ -52,6 +55,11 @@ struct DiagnosticsView: View {
+         .listStyle(.insetGrouped)
+         .navigationTitle("一键诊断")
+         .navigationBarTitleDisplayMode(.inline)
++        .sheet(isPresented: $isSharing) {
++            if let url = model.diagnosticExportURL {
++                ActivityView(activityItems: [url])
++            }
++        }
+     }
+ 
+     private func runDiagnostics() {
+diff --git "a/Features/Home/HomeView.swift" "b/Features/Home/HomeView.swift"
+index 08f0a24..fd7fd1e 100644
+--- "a/Features/Home/HomeView.swift"
++++ "b/Features/Home/HomeView.swift"
+@@ -2,7 +2,7 @@ import SwiftUI
+ 
+ @MainActor
+ struct HomeView: View {
+-    @Environment(AppModel.self) private var model
++    @EnvironmentObject private var model: AppModel
+ 
+     var body: some View {
+         ScrollView {
+@@ -59,7 +59,7 @@ struct HomeView: View {
+                 Label("节点", systemImage: "server.rack")
+                     .font(.headline)
+ 
+-                LabeledContent("当前连接") {
++                KeyValueRow("当前连接") {
+                     Text(model.currentNode?.name ?? "无")
+                         .foregroundStyle(model.currentNode == nil ? .secondary : .primary)
+                         .multilineTextAlignment(.trailing)
+@@ -67,7 +67,7 @@ struct HomeView: View {
+ 
+                 Divider()
+ 
+-                LabeledContent("下次连接") {
++                KeyValueRow("下次连接") {
+                     Text(model.preferredNode?.name ?? "尚未选择")
+                         .foregroundStyle(model.preferredNode == nil ? .secondary : .primary)
+                         .multilineTextAlignment(.trailing)
+diff --git "a/Features/Import/ImportView.swift" "b/Features/Import/ImportView.swift"
+index 0384958..bdc1038 100644
+--- "a/Features/Import/ImportView.swift"
++++ "b/Features/Import/ImportView.swift"
+@@ -4,7 +4,7 @@ import UIKit
+ 
+ @MainActor
+ struct ImportView: View {
+-    @Environment(AppModel.self) private var model
++    @EnvironmentObject private var model: AppModel
+     @FocusState private var isEditorFocused: Bool
+     @State private var isFileImporterPresented = false
+     @State private var isImporting = false
+@@ -69,7 +69,7 @@ struct ImportView: View {
+             }
+ 
+             if model.hasSavedSubscription {
+-                Section("已保存的订阅") {
++                Section {
+                     Button {
+                         Task { await model.updateSubscription() }
+                     } label: {
+@@ -81,6 +81,8 @@ struct ImportView: View {
+                         .frame(minHeight: SwiftGateTheme.minimumTapHeight)
+                     }
+                     .disabled(model.isUpdatingSubscription || isImporting)
++                } header: {
++                    Text("已保存的订阅")
+                 } footer: {
+                     Text("更新失败时继续使用上一份有效配置。")
+                 }
+@@ -101,7 +103,6 @@ struct ImportView: View {
+             }
+         }
+         .navigationTitle("导入")
+-        .scrollDismissesKeyboard(.interactively)
+         .toolbar {
+             ToolbarItemGroup(placement: .keyboard) {
+                 Spacer()
+diff --git "a/Features/Nodes/NodesView.swift" "b/Features/Nodes/NodesView.swift"
+index 07a454f..c33e6a7 100644
+--- "a/Features/Nodes/NodesView.swift"
++++ "b/Features/Nodes/NodesView.swift"
+@@ -2,7 +2,7 @@ import SwiftUI
+ 
+ @MainActor
+ struct NodesView: View {
+-    @Environment(AppModel.self) private var model
++    @EnvironmentObject private var model: AppModel
+     @State private var testingNodeIDs: Set<UUID> = []
+     @State private var isTestingAll = false
+     @State private var searchText = ""
+@@ -23,7 +23,7 @@ struct NodesView: View {
+                         selectionSummary
+                     }
+ 
+-                    Section("可用节点") {
++                    Section {
+                         ForEach(filteredNodes) { node in
+                             NodeRow(
+                                 node: node,
+@@ -34,6 +34,8 @@ struct NodesView: View {
+                                 onTest: { test(node) }
+                             )
+                         }
++                    } header: {
++                        Text("可用节点")
+                     } footer: {
+                         Text("无需先连接：选择会用于下次连接，测速只检查节点的网络延迟。")
+                     }
+@@ -47,7 +49,7 @@ struct NodesView: View {
+         }
+         .navigationTitle("节点")
+         .toolbar {
+-            ToolbarItem(placement: .topBarTrailing) {
++            ToolbarItem(placement: .navigationBarTrailing) {
+                 Button {
+                     Task { await testAll() }
+                 } label: {
+diff --git "a/Features/Settings/SettingsView.swift" "b/Features/Settings/SettingsView.swift"
+index ec76837..538374f 100644
+--- "a/Features/Settings/SettingsView.swift"
++++ "b/Features/Settings/SettingsView.swift"
+@@ -2,7 +2,7 @@ import SwiftUI
+ 
+ @MainActor
+ struct SettingsView: View {
+-    @Environment(AppModel.self) private var model
++    @EnvironmentObject private var model: AppModel
+ 
+     var body: some View {
+         Form {
+@@ -22,27 +22,29 @@ struct SettingsView: View {
+                 }
+             }
+ 
+-            Section("订阅") {
++            Section {
+                 Picker("自动更新时间", selection: updateIntervalBinding) {
+                     Text("每 6 小时").tag(6)
+                     Text("每 12 小时").tag(12)
+                     Text("每 24 小时").tag(24)
+                 }
++            } header: {
++                Text("订阅")
+             } footer: {
+                 Text("App 在前台时按所选周期检查；新配置验证失败会继续使用上一份有效配置。")
+             }
+ 
+             Section("状态") {
+-                LabeledContent("VPN") {
++                KeyValueRow("VPN") {
+                     Label(model.connectionStatusText, systemImage: model.connectionState.statusSymbol)
+                         .foregroundStyle(model.connectionState.statusColor)
+                 }
+ 
+-                LabeledContent("已导入节点") {
++                KeyValueRow("已导入节点") {
+                     Text("\(model.nodes.count) 个")
+                 }
+ 
+-                LabeledContent("当前选择") {
++                KeyValueRow("当前选择") {
+                     Text(model.preferredNode?.name ?? "无")
+                         .foregroundStyle(model.preferredNode == nil ? .secondary : .primary)
+                         .lineLimit(1)
+diff --git "a/Scripts/build-unsigned-ipa.sh" "b/Scripts/build-unsigned-ipa.sh"
+index 229572d..c4c12ce 100644
+--- "a/Scripts/build-unsigned-ipa.sh"
++++ "b/Scripts/build-unsigned-ipa.sh"
+@@ -8,14 +8,14 @@ SOURCE_PACKAGES="$BUILD_ROOT/SourcePackages"
+ STAGING="$BUILD_ROOT/staging"
+ OUTPUT_DIR="${SWIFTGATE_OUTPUT_DIR:-$ROOT/.build/artifacts}"
+ APP_PATH="$DERIVED_DATA/Build/Products/Release-iphoneos/SwiftGate.app"
+-IPA_PATH="$OUTPUT_DIR/SwiftGate-Unsigned.ipa"
++IPA_PATH="$OUTPUT_DIR/SwiftGate-TrollStore.ipa"
+ 
+ if [[ "$(uname -s)" != "Darwin" ]]; then
+   echo "A real iPhone IPA requires macOS, Xcode and the iOS SDK." >&2
+   exit 1
+ fi
+ 
+-for tool in xcodebuild xcodegen ditto shasum lipo unzip; do
++for tool in xcodebuild xcodegen ditto shasum lipo unzip codesign; do
+   if ! command -v "$tool" >/dev/null 2>&1; then
+     echo "Missing required tool: $tool" >&2
+     exit 1
+@@ -26,9 +26,9 @@ if [[ ! -d "$ROOT/Frameworks/Libbox.xcframework" || \
+       ! -d "$ROOT/.build/core/sing-box-for-apple/Library" ]]; then
+   echo "Building the native iPhone tunnel core (device slice only)..."
+   SWIFTGATE_LIBBOX_PLATFORMS="${SWIFTGATE_LIBBOX_PLATFORMS:-ios}" \
+-    "$ROOT/Scripts/prepare-core.sh"
++    bash "$ROOT/Scripts/prepare-core.sh"
+ else
+-  "$ROOT/Scripts/generate-project.sh"
++  bash "$ROOT/Scripts/generate-project.sh"
+ fi
+ 
+ rm -rf "$BUILD_ROOT"
+@@ -74,6 +74,16 @@ if [[ ! -f "$APP_PATH/SwiftGate" || ! -f "$APP_PATH/PlugIns/PacketTunnel.appex/P
+   echo "The app or Packet Tunnel executable is missing." >&2
+   exit 1
+ fi
++if [[ ! -f "$APP_PATH/Assets.car" ]]; then
++  echo "The compiled app icon and asset catalog are missing." >&2
++  exit 1
++fi
++for license_file in GPL-3.0.txt Yams-MIT.txt; do
++  if ! find "$APP_PATH" -type f -name "$license_file" -print -quit | grep -q .; then
++    echo "Required third-party license is missing: $license_file" >&2
++    exit 1
++  fi
++done
+ if ! lipo -archs "$APP_PATH/SwiftGate" | grep -qw arm64 || \
+    ! lipo -archs "$APP_PATH/PlugIns/PacketTunnel.appex/PacketTunnel" | grep -qw arm64; then
+   echo "The app or Packet Tunnel executable is missing the arm64 device slice." >&2
+@@ -90,6 +100,32 @@ fi
+ ditto "$APP_PATH" "$STAGING/Payload/SwiftGate.app"
+ find "$STAGING/Payload" -type d -name _CodeSignature -prune -exec rm -rf {} +
+ find "$STAGING/Payload" -type f -name embedded.mobileprovision -delete
++STAGED_APP="$STAGING/Payload/SwiftGate.app"
++STAGED_EXTENSION="$STAGED_APP/PlugIns/PacketTunnel.appex"
++
++echo "Embedding TrollStore-compatible entitlements..."
++codesign --force --sign - --timestamp=none --generate-entitlement-der \
++  --entitlements "$ROOT/Config/PacketTunnel-TrollStore.entitlements" \
++  "$STAGED_EXTENSION"
++codesign --force --sign - --timestamp=none --generate-entitlement-der \
++  --entitlements "$ROOT/Config/SwiftGate-TrollStore.entitlements" \
++  "$STAGED_APP"
++codesign --verify --deep --strict "$STAGED_APP"
++
++APP_ENTITLEMENTS="$BUILD_ROOT/app-entitlements.plist"
++EXT_ENTITLEMENTS="$BUILD_ROOT/extension-entitlements.plist"
++codesign -d --entitlements :- "$STAGED_APP" >"$APP_ENTITLEMENTS" 2>/dev/null
++codesign -d --entitlements :- "$STAGED_EXTENSION" >"$EXT_ENTITLEMENTS" 2>/dev/null
++for entitlement_file in "$APP_ENTITLEMENTS" "$EXT_ENTITLEMENTS"; do
++  grep -q "packet-tunnel-provider" "$entitlement_file"
++  grep -q "group.com.swiftgate.shared" "$entitlement_file"
++  grep -q "TROLLTROLL" "$entitlement_file"
++  if grep -q "get-task-allow" "$entitlement_file"; then
++    echo "TrollStore build must not require Developer Mode (get-task-allow found)." >&2
++    exit 1
++  fi
++done
++
+ rm -f "$IPA_PATH" "$IPA_PATH.sha256" "$OUTPUT_DIR/Build-Info.txt"
+ (
+   cd "$STAGING"
+@@ -99,8 +135,8 @@ rm -f "$IPA_PATH" "$IPA_PATH.sha256" "$OUTPUT_DIR/Build-Info.txt"
+ shasum -a 256 "$IPA_PATH" > "$IPA_PATH.sha256"
+ unzip -tq "$IPA_PATH"
+ {
+-  echo "artifact SwiftGate-Unsigned.ipa"
+-  echo "signing unsigned"
++  echo "artifact SwiftGate-TrollStore.ipa"
++  echo "signing ad-hoc with embedded Packet Tunnel and App Group entitlements"
+   echo "configuration Release"
+   echo "sdk iphoneos"
+   echo "built-at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+@@ -109,5 +145,5 @@ unzip -tq "$IPA_PATH"
+   fi
+ } > "$OUTPUT_DIR/Build-Info.txt"
+ 
+-echo "Unsigned IPA ready: $IPA_PATH"
+-echo "You must sign the app, PacketTunnel.appex and embedded frameworks with matching entitlements before installation."
++echo "TrollStore-ready IPA: $IPA_PATH"
++echo "The main app and PacketTunnel extension contain their required entitlements without get-task-allow."
+diff --git "a/Scripts/prepare-core.sh" "b/Scripts/prepare-core.sh"
+index 7921535..21e6e84 100644
+--- "a/Scripts/prepare-core.sh"
++++ "b/Scripts/prepare-core.sh"
+@@ -68,4 +68,4 @@ ditto "$APPLE_DIR/Libbox.xcframework" "$ROOT/Frameworks/Libbox.xcframework"
+ } > "$ROOT/Frameworks/SOURCE-REVISIONS.txt"
+ 
+ echo "Native core and official Apple bridge sources are ready."
+-"$ROOT/Scripts/generate-project.sh"
++bash "$ROOT/Scripts/generate-project.sh"
+diff --git "a/Scripts/verify-on-mac.sh" "b/Scripts/verify-on-mac.sh"
+index c764764..8bc6fe2 100644
+--- "a/Scripts/verify-on-mac.sh"
++++ "b/Scripts/verify-on-mac.sh"
+@@ -8,7 +8,7 @@ for plist in Config/*.plist Config/*.entitlements; do
+   plutil -lint "$plist"
+ done
+ 
+-"$ROOT/Scripts/generate-project.sh"
++bash "$ROOT/Scripts/generate-project.sh"
+ 
+ xcodebuild \
+   -project SwiftGateiOS.xcodeproj \
+@@ -18,4 +18,3 @@ xcodebuild \
+   -destination 'generic/platform=iOS Simulator' \
+   CODE_SIGNING_ALLOWED=NO \
+   test
+-
+diff --git "a/Services/AtomicConfigurationStore.swift" "b/Services/AtomicConfigurationStore.swift"
+index c4bb4e4..0803396 100644
+--- "a/Services/AtomicConfigurationStore.swift"
++++ "b/Services/AtomicConfigurationStore.swift"
+@@ -7,7 +7,7 @@ actor AtomicConfigurationStore {
+     private let encryptionKeyName = "configuration-encryption-key-v1"
+ 
+     init(
+-        containerURL: URL = AppConfiguration.sharedContainerURL,
++        containerURL: URL = AppConfiguration.storageContainerURL,
+         keychain: KeychainStore = KeychainStore()
+     ) {
+         configurationURL = containerURL.appendingPathComponent(AppConfiguration.activeConfigurationFile)
+diff --git "a/Services/DiagnosticService.swift" "b/Services/DiagnosticService.swift"
+index 502d592..e649fd3 100644
+--- "a/Services/DiagnosticService.swift"
++++ "b/Services/DiagnosticService.swift"
+@@ -48,7 +48,7 @@ struct DiagnosticService: Sendable {
+         if let preferredID = configuration.settings.preferredNodeID,
+            let node = configuration.nodes.first(where: { $0.id == preferredID }) {
+             do {
+-                let delay = try await latency.test(node, timeout: .seconds(6))
++                let delay = try await latency.test(node, timeout: 6)
+                 items.append(DiagnosticItem(name: "节点握手", passed: true, message: "TCP 握手 \(delay) ms"))
+             } catch {
+                 items.append(DiagnosticItem(name: "节点握手", passed: false, message: "连接节点服务器失败"))
+diff --git "a/Services/LatencyService.swift" "b/Services/LatencyService.swift"
+index 37845f3..cb75ce5 100644
+--- "a/Services/LatencyService.swift"
++++ "b/Services/LatencyService.swift"
+@@ -13,11 +13,11 @@ actor LatencyService {
+         httpSession = URLSession(configuration: configuration)
+     }
+ 
+-    func test(_ node: ProxyNode, timeout: Duration = .seconds(5)) async throws -> Int {
++    func test(_ node: ProxyNode, timeout: TimeInterval = 5) async throws -> Int {
+         try await measure(node, timeout: timeout)
+     }
+ 
+-    func testCurrentTunnel(timeout: Duration = .seconds(8)) async throws -> Int {
++    func testCurrentTunnel(timeout: TimeInterval = 8) async throws -> Int {
+         let urls = [
+             URL(string: "https://cp.cloudflare.com/generate_204")!,
+             URL(string: "https://www.gstatic.com/generate_204")!,
+@@ -30,44 +30,36 @@ actor LatencyService {
+         throw lastError
+     }
+ 
+-    private func measureHTTP(_ url: URL, timeout: Duration) async throws -> Int {
+-        let clock = ContinuousClock()
+-        let start = clock.now
++    private func measureHTTP(_ url: URL, timeout: TimeInterval) async throws -> Int {
++        let start = DispatchTime.now().uptimeNanoseconds
+         var request = URLRequest(url: url)
+         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+-        request.timeoutInterval = TimeInterval(timeout.components.seconds)
++        request.timeoutInterval = timeout
+         let (_, response) = try await httpSession.data(for: request)
+         guard let http = response as? HTTPURLResponse, [200, 204].contains(http.statusCode) else {
+             throw URLError(.badServerResponse)
+         }
+-        let elapsed = start.duration(to: clock.now)
+-        return Int(elapsed.components.seconds * 1_000)
+-            + Int(elapsed.components.attoseconds / 1_000_000_000_000_000)
++        return Int((DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
+     }
+ 
+-    private func measure(_ node: ProxyNode, timeout: Duration) async throws -> Int {
+-        let clock = ContinuousClock()
+-        let start = clock.now
++    private func measure(_ node: ProxyNode, timeout: TimeInterval) async throws -> Int {
++        let start = DispatchTime.now().uptimeNanoseconds
+         let connection = NWConnection(
+             host: NWEndpoint.Host(node.server),
+             port: NWEndpoint.Port(rawValue: node.port)!,
+             using: .tcp
+         )
+         let queue = DispatchQueue(label: "SwiftGate.Latency.\(node.id.uuidString)")
+-        let timeoutSeconds = max(
+-            0.1,
+-            Double(timeout.components.seconds)
+-                + Double(timeout.components.attoseconds) / 1_000_000_000_000_000_000
+-        )
++        let timeoutSeconds = max(0.1, timeout)
+         return try await withTaskCancellationHandler {
+             try await withCheckedThrowingContinuation { continuation in
+                 let attempt = LatencyAttempt(continuation)
+                 connection.stateUpdateHandler = { state in
+                     switch state {
+                     case .ready:
+-                        let elapsed = start.duration(to: clock.now)
+-                        let milliseconds = Int(elapsed.components.seconds * 1_000)
+-                            + Int(elapsed.components.attoseconds / 1_000_000_000_000_000)
++                        let milliseconds = Int(
++                            (DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
++                        )
+                         if attempt.finish(.success(milliseconds)) { connection.cancel() }
+                     case .failed(let error):
+                         _ = attempt.finish(.failure(error))
+diff --git "a/Services/TunnelManager.swift" "b/Services/TunnelManager.swift"
+index 909ee5d..5563b04 100644
+--- "a/Services/TunnelManager.swift"
++++ "b/Services/TunnelManager.swift"
+@@ -1,14 +1,13 @@
+ import Foundation
+ import NetworkExtension
+-import Observation
++import Combine
+ 
+ @MainActor
+-@Observable
+-final class TunnelManager {
+-    private(set) var state: VPNConnectionState = .unavailable
+-    private(set) var statusMessage = "正在读取系统 VPN 状态"
++final class TunnelManager: ObservableObject {
++    @Published private(set) var state: VPNConnectionState = .unavailable
++    @Published private(set) var statusMessage = "正在读取系统 VPN 状态"
+     private var manager: NETunnelProviderManager?
+-    private var statusObserver: NSObjectProtocol?
++    nonisolated(unsafe) private var statusObserver: NSObjectProtocol?
+ 
+     var isConfigured: Bool { manager != nil }
+ 
+diff --git "a/SharedUI/SwiftGateTheme.swift" "b/SharedUI/SwiftGateTheme.swift"
+index 4f3b2a9..25b7b1a 100644
+--- "a/SharedUI/SwiftGateTheme.swift"
++++ "b/SharedUI/SwiftGateTheme.swift"
+@@ -66,12 +66,49 @@ struct EmptyStateView: View {
+     let message: String
+ 
+     var body: some View {
+-        ContentUnavailableView {
+-            Label(title, systemImage: icon)
+-        } description: {
++        VStack(spacing: 12) {
++            Image(systemName: icon)
++                .font(.system(size: 34, weight: .semibold))
++                .foregroundStyle(.secondary)
++            Text(title)
++                .font(.headline)
+             Text(message)
++                .font(.subheadline)
++                .foregroundStyle(.secondary)
++                .multilineTextAlignment(.center)
+         }
++        .frame(maxWidth: .infinity, minHeight: 180)
++        .padding(24)
++        .accessibilityElement(children: .combine)
++    }
++}
++
++struct KeyValueRow<Value: View>: View {
++    let title: String
++    let value: Value
++
++    init(_ title: String, @ViewBuilder value: () -> Value) {
++        self.title = title
++        self.value = value()
+     }
++
++    var body: some View {
++        HStack(alignment: .firstTextBaseline, spacing: 12) {
++            Text(title)
++            Spacer(minLength: 12)
++            value
++        }
++    }
++}
++
++struct ActivityView: UIViewControllerRepresentable {
++    let activityItems: [Any]
++
++    func makeUIViewController(context: Context) -> UIActivityViewController {
++        UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
++    }
++
++    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+ }
+ 
+ struct BadgeView: View {
+diff --git "a/project-with-core.yml" "b/project-with-core.yml"
+index 967d7e5..61bc56f 100644
+--- "a/project-with-core.yml"
++++ "b/project-with-core.yml"
+@@ -20,8 +20,8 @@ targets:
+   PacketTunnel:
+     sources:
+       - path: .build/core/sing-box-for-apple/Library
+-    resources:
+       - path: .build/core/sing-box-for-apple/Localizable.xcstrings
++        buildPhase: resources
+     settings:
+       base:
+         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) SWIFTGATE_EMBEDDED_CORE"
+@@ -30,6 +30,8 @@ targets:
+         SWIFT_STRICT_CONCURRENCY: minimal
+     dependencies:
+       - framework: Frameworks/Libbox.xcframework
++      - sdk: libresolv.tbd
++      - sdk: SystemConfiguration.framework
+       - package: GRDB
+       - package: BinaryCodable
+       - package: CrashReporter
+diff --git "a/project.yml" "b/project.yml"
+index 09efb09..ee6ed01 100644
+--- "a/project.yml"
++++ "b/project.yml"
+@@ -3,7 +3,7 @@ name: SwiftGateiOS
+ options:
+   bundleIdPrefix: com.swiftgate
+   deploymentTarget:
+-    iOS: "17.0"
++    iOS: "15.0"
+   groupSortPosition: top
+   generateEmptyDirectories: true
+ 
+@@ -19,8 +19,8 @@ packages:
+ settings:
+   base:
+     SWIFT_VERSION: 5.0
+-    CURRENT_PROJECT_VERSION: 1
+-    MARKETING_VERSION: 0.2.0
++    CURRENT_PROJECT_VERSION: 2
++    MARKETING_VERSION: 0.2.1
+     CODE_SIGN_STYLE: Automatic
+     TARGETED_DEVICE_FAMILY: "1"
+     SUPPORTS_MACCATALYST: NO
+@@ -40,9 +40,10 @@ targets:
+       - path: Models
+       - path: Services
+       - path: SharedUI
+-    resources:
+       - path: Resources
++        buildPhase: resources
+       - path: Licenses
++        buildPhase: resources
+     settings:
+       base:
+         PRODUCT_BUNDLE_IDENTIFIER: com.swiftgate.ios
+diff --git a/README.md b/README.md
+index 61198a1..73b0746 100644
+--- a/README.md
++++ b/README.md
+@@ -6,7 +6,7 @@
+ 
+ ## 已实现
+ 
+-- iOS 17+ 原生 SwiftUI：首页、节点、导入、设置、诊断。
++- iOS 15+ 原生 SwiftUI：首页、节点、导入、设置、诊断。
+ - 连接状态严格来自 `NEVPNStatus`，不会显示假连接。
+ - 断开时可选择节点；连接时先让 Packet Tunnel 重载成功，再显示“当前”。
+ - 单节点和最多 4 路并发 TCP 延迟测试，底层超时会真正关闭连接。
+@@ -48,7 +48,7 @@ Extension 能力的付费 Apple Developer Program 账号。
+ 6. 选择真机运行；首次点连接时 iOS 会显示系统“添加 VPN 配置”授权。
+ 7. 在 Mac 上执行 `bash Scripts/verify-on-mac.sh` 运行模拟器构建与单元测试。
+ 
+-### 生成未签名 IPA
++### 生成 TrollStore 专用 IPA
+ 
+ 在 Mac 上执行：
+ 
+@@ -57,12 +57,13 @@ brew install xcodegen
+ bash Scripts/build-unsigned-ipa.sh
+ ```
+ 
+-文件会生成到 `.build/artifacts/SwiftGate-Unsigned.ipa`，同时附带 SHA-256 和核心
+-提交信息。它是完整的 iPhone Release 应用包，但没有签名，不能直接安装。
++文件会生成到 `.build/artifacts/SwiftGate-TrollStore.ipa`，同时附带 SHA-256 和核心
++提交信息。它是已经预嵌 VPN、App Group 与 Keychain 权限的 TrollStore 专用包；
++请直接交给 TrollStore 安装，不要再用其他签名工具改写 Bundle ID。
+ 
+ 如果没有 Mac，可把本目录内容放到一个 GitHub 仓库根目录，在 Actions 页面手动运行
+-`Build unsigned iPhone IPA`。工作流使用苹果构建机，只编译 iPhone 真机需要的 arm64
+-核心，并把结果作为 `SwiftGate-Unsigned-IPA` 下载项保存 14 天。工作流不接收证书、
++`Build TrollStore iPhone IPA`。工作流使用苹果构建机，只编译 iPhone 真机需要的 arm64
++核心，并把结果作为 `SwiftGate-TrollStore-IPA` 下载项保存 14 天。工作流不接收证书、
+ 密码或描述文件。
+ 
+ 重新签名时必须同时处理宿主 App、`PacketTunnel.appex` 和嵌入框架；宿主与扩展的
