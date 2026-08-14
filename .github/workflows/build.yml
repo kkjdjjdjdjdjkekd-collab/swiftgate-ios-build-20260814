@@ -1,4 +1,4 @@
-name: Build SwiftGate unsigned IPA
+name: Build SwiftGate TrollStore IPA
 
 on:
   push:
@@ -18,6 +18,7 @@ jobs:
       SWIFTGATE_APPLE_REF: b1daf888efa6a5b80d668257ba540e600384d626
       SWIFTGATE_CORE_REF: 3e16ce764818796996c1be3f12b0c6008808cf34
       SWIFTGATE_LIBBOX_PLATFORMS: ios
+
     steps:
       - name: Check out build payload
         uses: actions/checkout@v7
@@ -31,53 +32,47 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Extract verified SwiftGate source
+      - name: Extract and patch SwiftGate source
         run: |
           unzip -q SwiftGate-iOS-0.2.0-CI-Ready.zip -d SwiftGate-iOS
-          chmod +x SwiftGate-iOS/Scripts/*.sh
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path("SwiftGate-iOS/project-with-core.yml")
-          source = path.read_text(encoding="utf-8")
-          needle = "      - framework: Frameworks/Libbox.xcframework\n"
-          replacement = needle + "      - sdk: libresolv.tbd\n      - sdk: SystemConfiguration.framework\n"
-          if source.count(needle) != 1:
-              raise SystemExit("Unexpected project-with-core.yml structure")
-          path.write_text(source.replace(needle, replacement), encoding="utf-8")
-          PY
-          python3 - <<'PY'
-          from pathlib import Path
+          cd SwiftGate-iOS
+          git apply ../SwiftGate-0.2.1-TrollStore.patch
+          chmod +x Scripts/*.sh
 
-          def replace_once(relative_path, old, new):
-              path = Path("SwiftGate-iOS") / relative_path
-              source = path.read_text(encoding="utf-8")
-              if source.count(old) != 1:
-                  raise SystemExit(f"Unexpected {relative_path} structure: {old!r}")
-              path.write_text(source.replace(old, new), encoding="utf-8")
-
-          replace_once("Features/Import/ImportView.swift", '                Section("已保存的订阅") {', '                Section {')
-          replace_once("Features/Import/ImportView.swift", '                } footer: {\n                    Text("更新失败时继续使用上一份有效配置。")', '                } header: {\n                    Text("已保存的订阅")\n                } footer: {\n                    Text("更新失败时继续使用上一份有效配置。")')
-          replace_once("Features/Nodes/NodesView.swift", '                    Section("可用节点") {', '                    Section {')
-          replace_once("Features/Nodes/NodesView.swift", '                    } footer: {\n                        Text("无需先连接：选择会用于下次连接，测速只检查节点的网络延迟。")', '                    } header: {\n                        Text("可用节点")\n                    } footer: {\n                        Text("无需先连接：选择会用于下次连接，测速只检查节点的网络延迟。")')
-          replace_once("Features/Settings/SettingsView.swift", '            Section("订阅") {', '            Section {')
-          replace_once("Features/Settings/SettingsView.swift", '            } footer: {\n                Text("App 在前台时按所选周期检查；新配置验证失败会继续使用上一份有效配置。")', '            } header: {\n                Text("订阅")\n            } footer: {\n                Text("App 在前台时按所选周期检查；新配置验证失败会继续使用上一份有效配置。")')
-          replace_once("Services/TunnelManager.swift", '    private var statusObserver: NSObjectProtocol?', '    @ObservationIgnored\n    nonisolated(unsafe) private var statusObserver: NSObjectProtocol?')
-          replace_once("project.yml", '      - path: SharedUI\n    resources:\n      - path: Resources\n      - path: Licenses', '      - path: SharedUI\n      - path: Resources\n        buildPhase: resources\n      - path: Licenses\n        buildPhase: resources')
-          replace_once("project-with-core.yml", '    sources:\n      - path: .build/core/sing-box-for-apple/Library\n    resources:\n      - path: .build/core/sing-box-for-apple/Localizable.xcstrings', '    sources:\n      - path: .build/core/sing-box-for-apple/Library\n      - path: .build/core/sing-box-for-apple/Localizable.xcstrings\n        buildPhase: resources')
-          replace_once("Scripts/build-unsigned-ipa.sh", 'if [[ ! -f "$APP_PATH/SwiftGate" || ! -f "$APP_PATH/PlugIns/PacketTunnel.appex/PacketTunnel" ]]; then\n  echo "The app or Packet Tunnel executable is missing." >&2\n  exit 1\nfi\nif ! lipo', 'if [[ ! -f "$APP_PATH/SwiftGate" || ! -f "$APP_PATH/PlugIns/PacketTunnel.appex/PacketTunnel" ]]; then\n  echo "The app or Packet Tunnel executable is missing." >&2\n  exit 1\nfi\nif [[ ! -f "$APP_PATH/Assets.car" ]]; then\n  echo "The compiled app icon and asset catalog are missing." >&2\n  exit 1\nfi\nfor license_file in GPL-3.0.txt Yams-MIT.txt; do\n  if ! find "$APP_PATH" -type f -name "$license_file" -print -quit | grep -q .; then\n    echo "Required third-party license is missing: $license_file" >&2\n    exit 1\n  fi\ndone\nif ! lipo')
-          PY
-
-      - name: Build native core and unsigned IPA
+      - name: Build native core and TrollStore-ready IPA
         working-directory: SwiftGate-iOS
         run: bash Scripts/build-unsigned-ipa.sh
 
-      - name: Upload unsigned IPA
+      - name: Verify TrollStore package
+        working-directory: SwiftGate-iOS
+        run: |
+          IPA=.build/artifacts/SwiftGate-TrollStore.ipa
+          VERIFY=.build/trollstore-verify
+          mkdir -p "$VERIFY"
+          unzip -q "$IPA" -d "$VERIFY"
+          APP="$VERIFY/Payload/SwiftGate.app"
+          EXT="$APP/PlugIns/PacketTunnel.appex"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist")" = "15.0"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$EXT/Info.plist")" = "15.0"
+          codesign --verify --deep --strict "$APP"
+          codesign -d --entitlements :- "$APP" > .build/app-entitlements.plist 2>/dev/null
+          codesign -d --entitlements :- "$EXT" > .build/extension-entitlements.plist 2>/dev/null
+          for file in .build/app-entitlements.plist .build/extension-entitlements.plist; do
+            grep -q packet-tunnel-provider "$file"
+            grep -q group.com.swiftgate.shared "$file"
+            grep -q TROLLTROLL "$file"
+            ! grep -q get-task-allow "$file"
+          done
+          otool -l "$APP/SwiftGate" | grep -q LC_CODE_SIGNATURE
+          otool -l "$EXT/PacketTunnel" | grep -q LC_CODE_SIGNATURE
+
+      - name: Upload TrollStore IPA
         uses: actions/upload-artifact@v7
         with:
-          name: SwiftGate-Unsigned-IPA
+          name: SwiftGate-TrollStore-IPA
           path: |
-            SwiftGate-iOS/.build/artifacts/SwiftGate-Unsigned.ipa
-            SwiftGate-iOS/.build/artifacts/SwiftGate-Unsigned.ipa.sha256
+            SwiftGate-iOS/.build/artifacts/SwiftGate-TrollStore.ipa
+            SwiftGate-iOS/.build/artifacts/SwiftGate-TrollStore.ipa.sha256
             SwiftGate-iOS/.build/artifacts/Build-Info.txt
           if-no-files-found: error
           retention-days: 14
