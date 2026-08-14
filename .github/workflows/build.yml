@@ -35,6 +35,16 @@ jobs:
         run: |
           unzip -q SwiftGate-iOS-0.2.0-CI-Ready.zip -d SwiftGate-iOS
           chmod +x SwiftGate-iOS/Scripts/*.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("SwiftGate-iOS/project-with-core.yml")
+          source = path.read_text(encoding="utf-8")
+          needle = "      - framework: Frameworks/Libbox.xcframework\n"
+          replacement = needle + "      - sdk: libresolv.tbd\n      - sdk: SystemConfiguration.framework\n"
+          if source.count(needle) != 1:
+              raise SystemExit("Unexpected project-with-core.yml structure")
+          path.write_text(source.replace(needle, replacement), encoding="utf-8")
+          PY
 
       - name: Build native core and unsigned IPA
         working-directory: SwiftGate-iOS
