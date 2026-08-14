@@ -45,6 +45,24 @@ jobs:
               raise SystemExit("Unexpected project-with-core.yml structure")
           path.write_text(source.replace(needle, replacement), encoding="utf-8")
           PY
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(relative_path, old, new):
+              path = Path("SwiftGate-iOS") / relative_path
+              source = path.read_text(encoding="utf-8")
+              if source.count(old) != 1:
+                  raise SystemExit(f"Unexpected {relative_path} structure: {old!r}")
+              path.write_text(source.replace(old, new), encoding="utf-8")
+
+          replace_once("Features/Import/ImportView.swift", '                Section("已保存的订阅") {', '                Section {')
+          replace_once("Features/Import/ImportView.swift", '                } footer: {\n                    Text("更新失败时继续使用上一份有效配置。")', '                } header: {\n                    Text("已保存的订阅")\n                } footer: {\n                    Text("更新失败时继续使用上一份有效配置。")')
+          replace_once("Features/Nodes/NodesView.swift", '                    Section("可用节点") {', '                    Section {')
+          replace_once("Features/Nodes/NodesView.swift", '                    } footer: {\n                        Text("无需先连接：选择会用于下次连接，测速只检查节点的网络延迟。")', '                    } header: {\n                        Text("可用节点")\n                    } footer: {\n                        Text("无需先连接：选择会用于下次连接，测速只检查节点的网络延迟。")')
+          replace_once("Features/Settings/SettingsView.swift", '            Section("订阅") {', '            Section {')
+          replace_once("Features/Settings/SettingsView.swift", '            } footer: {\n                Text("App 在前台时按所选周期检查；新配置验证失败会继续使用上一份有效配置。")', '            } header: {\n                Text("订阅")\n            } footer: {\n                Text("App 在前台时按所选周期检查；新配置验证失败会继续使用上一份有效配置。")')
+          replace_once("Services/TunnelManager.swift", '    private var statusObserver: NSObjectProtocol?', '    @ObservationIgnored\n    nonisolated(unsafe) private var statusObserver: NSObjectProtocol?')
+          PY
 
       - name: Build native core and unsigned IPA
         working-directory: SwiftGate-iOS
