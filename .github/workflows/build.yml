@@ -32,21 +32,31 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Extract verified SwiftGate 0.2.3 source
+      - name: Extract verified SwiftGate 0.2.4 source
         run: |
-          unzip -q SwiftGate-iOS-0.2.3-TrollStore-CI-r6.zip -d SwiftGate-iOS
+          unzip -q SwiftGate-iOS-0.2.4-TrollStore-CI-r7.zip -d SwiftGate-iOS
           cd SwiftGate-iOS
-          grep -q 'MARKETING_VERSION: 0.2.3' project.yml
-          grep -q 'CURRENT_PROJECT_VERSION: 4' project.yml
+          grep -q 'MARKETING_VERSION: 0.2.4' project.yml
+          grep -q 'CURRENT_PROJECT_VERSION: 5' project.yml
           grep -q 'IPHONEOS_DEPLOYMENT_TARGET=15.0' Scripts/build-unsigned-ipa.sh
           grep -q 'OTHER_LDFLAGS=.*-lresolv.*SystemConfiguration' Scripts/build-unsigned-ipa.sh
           grep -q '"default_domain_resolver"' Services/RuntimeConfigBuilder.swift
-          grep -q '"server": "local"' Services/RuntimeConfigBuilder.swift
-          grep -q '"strategy": "prefer_ipv4"' Services/RuntimeConfigBuilder.swift
+          grep -q '"server": "bootstrap"' Services/RuntimeConfigBuilder.swift
+          grep -q '"strategy": "ipv4_only"' Services/RuntimeConfigBuilder.swift
+          grep -q '"dns_mode": "hijack"' Services/RuntimeConfigBuilder.swift
+          grep -q '"dns_address": \["172.19.0.2", "fdfe:dcba:9876::2"\]' Services/RuntimeConfigBuilder.swift
+          grep -q '"mtu": 1400' Services/RuntimeConfigBuilder.swift
+          grep -q '"stack": "system"' Services/RuntimeConfigBuilder.swift
+          grep -q '"strict_route": false' Services/RuntimeConfigBuilder.swift
+          ! grep -q '"route_exclude_address"' Services/RuntimeConfigBuilder.swift
+          grep -q 'tunnelProtocol.excludeLocalNetworks = false' Services/TunnelManager.swift
+          grep -q 'testTunnelRoute' Services/LatencyService.swift
+          grep -q 'tunnelNetworkAvailable' App/AppModel.swift
+          grep -q 'RuntimeNetworkContractTests' Tests/RuntimeNetworkContractTests.swift
           grep -q 'default_domain_resolver' Tests/SwiftGateCoreTests.swift
           grep -q 'sing-box check' Scripts/build-unsigned-ipa.sh
           grep -q 'sing-box-apple-app-group-fallback.patch' Scripts/prepare-core.sh
-          grep -Fq 'XCTAssertFalse(runtime.contains("\"mtu\":1500"))' Tests/SwiftGateCoreTests.swift
+          grep -Fq 'XCTAssertTrue(runtime.contains("\"mtu\":1400"))' Tests/SwiftGateCoreTests.swift
           grep -q 'tunnel-last-error.txt' PacketTunnelExtension/PacketTunnelProvider.swift
           grep -q 'tunnel-last-error.txt' Services/TunnelManager.swift
           grep -q 'SensitiveTextRedactor' PacketTunnelExtension/PacketTunnelProvider.swift
