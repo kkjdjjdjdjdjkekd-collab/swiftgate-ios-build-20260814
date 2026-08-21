@@ -32,11 +32,30 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Extract and patch SwiftGate source
+      - name: Extract verified SwiftGate 0.2.3 source
         run: |
-          unzip -q SwiftGate-iOS-0.2.0-CI-Ready.zip -d SwiftGate-iOS
+          unzip -q SwiftGate-iOS-0.2.3-TrollStore-CI-r6.zip -d SwiftGate-iOS
           cd SwiftGate-iOS
-          git apply ../SwiftGate-0.2.1-TrollStore.patch
+          grep -q 'MARKETING_VERSION: 0.2.3' project.yml
+          grep -q 'CURRENT_PROJECT_VERSION: 4' project.yml
+          grep -q 'IPHONEOS_DEPLOYMENT_TARGET=15.0' Scripts/build-unsigned-ipa.sh
+          grep -q 'OTHER_LDFLAGS=.*-lresolv.*SystemConfiguration' Scripts/build-unsigned-ipa.sh
+          grep -q '"default_domain_resolver"' Services/RuntimeConfigBuilder.swift
+          grep -q '"server": "local"' Services/RuntimeConfigBuilder.swift
+          grep -q '"strategy": "prefer_ipv4"' Services/RuntimeConfigBuilder.swift
+          grep -q 'default_domain_resolver' Tests/SwiftGateCoreTests.swift
+          grep -q 'sing-box check' Scripts/build-unsigned-ipa.sh
+          grep -q 'sing-box-apple-app-group-fallback.patch' Scripts/prepare-core.sh
+          grep -Fq 'XCTAssertFalse(runtime.contains("\"mtu\":1500"))' Tests/SwiftGateCoreTests.swift
+          grep -q 'tunnel-last-error.txt' PacketTunnelExtension/PacketTunnelProvider.swift
+          grep -q 'tunnel-last-error.txt' Services/TunnelManager.swift
+          grep -q 'SensitiveTextRedactor' PacketTunnelExtension/PacketTunnelProvider.swift
+          grep -q 'completeFileProtection' PacketTunnelExtension/PacketTunnelProvider.swift
+          grep -q 'fetchLastDisconnectError' Services/TunnelManager.swift
+          grep -q 'TROLLTROLL.com.swiftgate.ios</string>' Config/SwiftGate-TrollStore.entitlements
+          grep -q 'TROLLTROLL.com.swiftgate.ios.PacketTunnel</string>' Config/PacketTunnel-TrollStore.entitlements
+          grep -q 'ip_is_private' Services/RuntimeConfigBuilder.swift
+          grep -q 'SWIFTGATE_CORE_REF' Scripts/build-unsigned-ipa.sh
           chmod +x Scripts/*.sh
 
       - name: Build native core and TrollStore-ready IPA
@@ -54,15 +73,30 @@ jobs:
           EXT="$APP/PlugIns/PacketTunnel.appex"
           test "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist")" = "15.0"
           test "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$EXT/Info.plist")" = "15.0"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")" = "com.swiftgate.ios"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$EXT/Info.plist")" = "com.swiftgate.ios.PacketTunnel"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :BasePackageIdentifier' "$EXT/Info.plist")" = "com.swiftgate.ios"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :AppGroupIdentifier' "$APP/Info.plist")" = "group.com.swiftgate.shared"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :AppGroupIdentifier' "$EXT/Info.plist")" = "group.com.swiftgate.shared"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = "com.apple.networkextension.packet-tunnel"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPrincipalClass' "$EXT/Info.plist")" = "PacketTunnel.PacketTunnelProvider"
           codesign --verify --deep --strict "$APP"
           codesign -d --entitlements :- "$APP" > .build/app-entitlements.plist 2>/dev/null
           codesign -d --entitlements :- "$EXT" > .build/extension-entitlements.plist 2>/dev/null
-          for file in .build/app-entitlements.plist .build/extension-entitlements.plist; do
-            grep -q packet-tunnel-provider "$file"
-            grep -q group.com.swiftgate.shared "$file"
-            grep -q TROLLTROLL "$file"
-            ! grep -q get-task-allow "$file"
-          done
+          APP_ENT=.build/app-entitlements.plist
+          EXT_ENT=.build/extension-entitlements.plist
+          test "$(/usr/libexec/PlistBuddy -c 'Print :application-identifier' "$APP_ENT")" = "TROLLTROLL.com.swiftgate.ios"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :application-identifier' "$EXT_ENT")" = "TROLLTROLL.com.swiftgate.ios.PacketTunnel"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.team-identifier' "$APP_ENT")" = "TROLLTROLL"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.team-identifier' "$EXT_ENT")" = "TROLLTROLL"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.networking.networkextension:0' "$APP_ENT")" = "packet-tunnel-provider"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.networking.networkextension:0' "$EXT_ENT")" = "packet-tunnel-provider"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups:0' "$APP_ENT")" = "group.com.swiftgate.shared"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups:0' "$EXT_ENT")" = "group.com.swiftgate.shared"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :keychain-access-groups:0' "$APP_ENT")" = "TROLLTROLL.com.swiftgate.ios"
+          ! /usr/libexec/PlistBuddy -c 'Print :keychain-access-groups' "$EXT_ENT" >/dev/null 2>&1
+          ! /usr/libexec/PlistBuddy -c 'Print :get-task-allow' "$APP_ENT" >/dev/null 2>&1
+          ! /usr/libexec/PlistBuddy -c 'Print :get-task-allow' "$EXT_ENT" >/dev/null 2>&1
           otool -l "$APP/SwiftGate" | grep -q LC_CODE_SIGNATURE
           otool -l "$EXT/PacketTunnel" | grep -q LC_CODE_SIGNATURE
 
