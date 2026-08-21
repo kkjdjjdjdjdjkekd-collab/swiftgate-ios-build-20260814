@@ -17,7 +17,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       SWIFTGATE_APPLE_REF: b1daf888efa6a5b80d668257ba540e600384d626
       SWIFTGATE_CORE_REF: 3e16ce764818796996c1be3f12b0c6008808cf34
-      SWIFTGATE_LIBBOX_PLATFORMS: ios
+      SWIFTGATE_LIBBOX_PLATFORMS: ios,iossimulator
 
     steps:
       - name: Check out build payload
@@ -32,12 +32,18 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Extract verified SwiftGate 0.2.4 source
+      - name: Extract verified SwiftGate 0.2.5 source
         run: |
-          unzip -q SwiftGate-iOS-0.2.4-TrollStore-CI-r7.zip -d SwiftGate-iOS
+          unzip -tq SwiftGate-iOS-0.2.5-TrollStore-CI-r9.zip
+          unzip -q SwiftGate-iOS-0.2.5-TrollStore-CI-r9.zip -d SwiftGate-iOS
           cd SwiftGate-iOS
-          grep -q 'MARKETING_VERSION: 0.2.4' project.yml
-          grep -q 'CURRENT_PROJECT_VERSION: 5' project.yml
+          test "$(find . -type f | wc -l | tr -d ' ')" = "60"
+          test ! -d .git
+          test ! -d .build
+          test ! -d Frameworks/Libbox.xcframework
+          ! find . -type f \( -name '*.ipa' -o -name '*.mobileprovision' \) -print -quit | grep -q .
+          grep -q 'MARKETING_VERSION: 0.2.5' project.yml
+          grep -q 'CURRENT_PROJECT_VERSION: 6' project.yml
           grep -q 'IPHONEOS_DEPLOYMENT_TARGET=15.0' Scripts/build-unsigned-ipa.sh
           grep -q 'OTHER_LDFLAGS=.*-lresolv.*SystemConfiguration' Scripts/build-unsigned-ipa.sh
           grep -q '"default_domain_resolver"' Services/RuntimeConfigBuilder.swift
@@ -52,7 +58,27 @@ jobs:
           grep -q 'tunnelProtocol.excludeLocalNetworks = false' Services/TunnelManager.swift
           grep -q 'testTunnelRoute' Services/LatencyService.swift
           grep -q 'tunnelNetworkAvailable' App/AppModel.swift
+          grep -q 'runtimeGeneration' App/AppModel.swift
+          grep -q 'fallbackAttemptedGeneration' App/AppModel.swift
+          grep -q 'canFallbackToCompatibleDNS' Services/RuntimeConfigBuilder.swift
+          grep -q 'reloadSessionWhenReady' Services/TunnelManager.swift
+          grep -q 'Task.checkCancellation' Services/TunnelManager.swift
+          grep -q 'providerMessageTimeout' Services/TunnelManager.swift
+          grep -q 'withTaskCancellationHandler' Services/TunnelManager.swift
+          grep -q 'ProviderMessageAttempt' Services/TunnelManager.swift
+          grep -q 'testCompatibleDNSFallbackRunsOnlyOnce' Tests/SwiftGateCoreTests.swift
+          grep -q 'testDNSFallbackRollbackReconstructsTheOriginalRuntimeExactly' Tests/RuntimeNetworkContractTests.swift
           grep -q 'RuntimeNetworkContractTests' Tests/RuntimeNetworkContractTests.swift
+          grep -q 'testDNSHijackAndResolverReferencesFormACompleteChain' Tests/RuntimeNetworkContractTests.swift
+          grep -q 'testVMessMKCPShareIsRejectedWithActionableCoreMessage' Tests/SwiftGateCoreTests.swift
+          grep -q 'testVMessWebSocketShareMapsPinnedCoreFields' Tests/SwiftGateCoreTests.swift
+          grep -q 'testVMessCipherWhitelistMatchesPinnedCore' Tests/SwiftGateCoreTests.swift
+          grep -q 'testPersistedVMessMKCPNodeStillFailsBeforeCoreStartup' Tests/SwiftGateCoreTests.swift
+          grep -q 'testClashYAMLVMessFieldsReachPinnedCoreOutbound' Tests/SwiftGateCoreTests.swift
+          grep -q 'testClashYAMLRejectsVMessMKCPBeforeSaving' Tests/SwiftGateCoreTests.swift
+          grep -Fq 'case "kcp", "mkcp":' Services/ShareLinkParser.swift
+          grep -Fq '当前 iOS 内核不支持，请换用同服务的 TCP、WS 或 VLESS 节点' Services/ShareLinkParser.swift
+          grep -Fq 'try RuntimeConfigBuilder().validate(node)' Services/ClashYAMLParser.swift
           grep -q 'default_domain_resolver' Tests/SwiftGateCoreTests.swift
           grep -q 'sing-box check' Scripts/build-unsigned-ipa.sh
           grep -q 'sing-box-apple-app-group-fallback.patch' Scripts/prepare-core.sh
@@ -66,16 +92,177 @@ jobs:
           grep -q 'TROLLTROLL.com.swiftgate.ios.PacketTunnel</string>' Config/PacketTunnel-TrollStore.entitlements
           grep -q 'ip_is_private' Services/RuntimeConfigBuilder.swift
           grep -q 'SWIFTGATE_CORE_REF' Scripts/build-unsigned-ipa.sh
+          test -f Tests/Fixtures/vless-ws-runtime.json
+          test -f Tests/Fixtures/vmess-ws-runtime.json
+          grep -Fq '"$ROOT/Tests/Fixtures/vless-ws-runtime.json"' Scripts/build-unsigned-ipa.sh
+          grep -Fq '"$ROOT/Tests/Fixtures/vmess-ws-runtime.json"' Scripts/build-unsigned-ipa.sh
+          grep -Fq 'sing-box check -c "$fixture"' Scripts/build-unsigned-ipa.sh
           chmod +x Scripts/*.sh
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          app = Path("App/AppModel.swift").read_text(encoding="utf-8")
+          tunnel = Path("Services/TunnelManager.swift").read_text(encoding="utf-8")
+          runtime = Path("Services/RuntimeConfigBuilder.swift").read_text(encoding="utf-8")
+          parser = Path("Services/ShareLinkParser.swift").read_text(encoding="utf-8")
+          clash = Path("Services/ClashYAMLParser.swift").read_text(encoding="utf-8")
+
+          for fixture_name, outbound_type in (
+              ("vless-ws-runtime.json", "vless"),
+              ("vmess-ws-runtime.json", "vmess"),
+          ):
+              fixture = json.loads(
+                  Path("Tests/Fixtures", fixture_name).read_text(encoding="utf-8")
+              )
+              actions = [rule.get("action") for rule in fixture["route"]["rules"][:2]]
+              assert actions == ["sniff", "hijack-dns"], \
+                  f"{fixture_name} must sniff before protocol-based DNS hijack"
+              proxy = next(
+                  outbound for outbound in fixture["outbounds"]
+                  if outbound.get("type") == outbound_type
+              )
+              assert proxy["transport"]["type"] == "ws", \
+                  f"{fixture_name} must exercise a WebSocket transport"
+              assert proxy["tls"]["enabled"] is True, \
+                  f"{fixture_name} must exercise TLS"
+
+          sniff_rule = 'let sniffRule: [String: Any] = ["action": "sniff"]'
+          dns_rule = 'let dnsRule: [String: Any] = ["protocol": "dns", "action": "hijack-dns"]'
+          assert sniff_rule in runtime and dns_rule in runtime, "runtime lacks sniff/DNS hijack rules"
+          assert runtime.index(sniff_rule) < runtime.index(dns_rule), \
+              "sniff must be declared before protocol-based DNS hijack"
+          assert "routeRules = [sniffRule, dnsRule]" in runtime, \
+              "direct mode must sniff before hijacking DNS"
+          assert runtime.count("                sniffRule,\n                dnsRule,") == 2, \
+              "global and rule modes must sniff before hijacking DNS"
+          assert "[dnsRule, sniffRule]" not in runtime, \
+              "no route mode may hijack protocol=dns before sniffing"
+
+          mkcp_case = 'case "kcp", "mkcp":'
+          assert mkcp_case in parser, "mKCP parser branch is missing"
+          mkcp_branch = parser[
+              parser.index(mkcp_case):parser.index("        default:", parser.index(mkcp_case))
+          ]
+          assert "throw ImportError.unsupported" in mkcp_branch, \
+              "mKCP must be rejected explicitly instead of being silently mapped to TCP"
+          for alternative in ("mKCP", "TCP", "WS", "VLESS"):
+              assert alternative in mkcp_branch, \
+                  f"mKCP rejection must name {alternative} in its actionable explanation"
+          assert 'case "ws", "http", "httpupgrade", "grpc", "quic":' in parser, \
+              "supported VMess transports must remain importable"
+
+          for source_name, source in (
+              ("ShareLinkParser", parser),
+              ("RuntimeConfigBuilder", runtime),
+          ):
+              security_start = source.index("let supportedSecurity: Set<String> = [")
+              security_end = source.index("]", security_start)
+              whitelist = source[security_start:security_end]
+              assert '"aes-128-ctr"' in whitelist, \
+                  f"{source_name} must accept the cipher supported by pinned sing-box"
+              assert '"aes-128-cfb"' not in whitelist, \
+                  f"{source_name} must reject the cipher unsupported by pinned sing-box"
+
+          clash_validation = "try RuntimeConfigBuilder().validate(node)"
+          assert clash_validation in clash, "Clash nodes are not compatibility-validated"
+          assert clash.index(clash_validation) < clash.index("        return node", clash.index(clash_validation)), \
+              "Clash compatibility validation must happen before a node is returned for saving"
+
+          verify_start = app.index("private func verifyConnectedTunnel")
+          verify_end = app.index("private func buildRuntime", verify_start)
+          verify = app[verify_start:verify_end]
+          one_shot_guard = "fallbackAttemptedGeneration != verificationGeneration"
+          mark_attempt = "fallbackAttemptedGeneration = verificationGeneration"
+          fallback_reload = "try await tunnel.reload(runtimeConfiguration: fallbackRuntime)"
+          rollback_state = "fallbackRollbackState = ("
+          rollback_call = "await rollbackCompatibleDNSIfNeeded(for: verificationGeneration)"
+          assert one_shot_guard in verify, "DNS fallback lacks a per-generation one-shot guard"
+          assert verify.count(mark_attempt) == 1, "fallback attempt must be marked exactly once"
+          assert verify.index(one_shot_guard) < verify.index(mark_attempt) < verify.index(fallback_reload), \
+              "fallback must be guarded and marked before the provider reload"
+          assert "let previousRuntime" in verify, "fallback lacks a reconstructable rollback runtime"
+          assert rollback_state in verify, "fallback does not persist its rollback state"
+          assert verify.index(rollback_state) < verify.index("activeDNSProfile = .proxiedHTTPS") \
+              < verify.index(fallback_reload), "rollback state must be armed before enabling fallback DNS"
+          assert verify.count(rollback_call) >= 2, \
+              "route and HTTPS failures must both call the compatible-DNS rollback helper"
+
+          rollback_start = app.index("private func rollbackCompatibleDNSIfNeeded")
+          rollback_end = app.index("func selectNode", rollback_start)
+          rollback = app[rollback_start:rollback_end]
+          clear_state = "fallbackRollbackState = nil"
+          restore_profile = "activeDNSProfile = rollback.profile"
+          restore_runtime = "try? await tunnel.reload(runtimeConfiguration: rollback.runtime)"
+          for contract in (clear_state, restore_profile, restore_runtime):
+              assert contract in rollback, f"compatible-DNS rollback lacks {contract}"
+          assert rollback.index(clear_state) < rollback.index(restore_profile) < rollback.index(restore_runtime), \
+              "rollback must be consumed before restoring profile and provider runtime"
+
+          commit_start = app.index("private func commitSettings")
+          commit_end = app.index("private func restartHealthMonitor", commit_start)
+          commit = app[commit_start:commit_end]
+          assert "var reloadAttempted = false" in commit
+          assert "reloadAttempted = true" in commit
+          assert commit.index("reloadAttempted = true") < commit.index("try await tunnel.reload"), \
+              "settings rollback must be armed before reload can throw"
+          assert "if reloadAttempted" in commit, "settings failure lacks runtime rollback"
+
+          send_start = tunnel.index("static func send(")
+          send = tunnel[send_start:]
+          for contract in (
+              "withTaskCancellationHandler",
+              "ProviderMessageAttempt",
+              "providerMessageTimeout",
+              "CancellationError()",
+              "asyncAfter",
+          ):
+              assert contract in send, f"provider message send lacks {contract}"
+          PY
 
       - name: Build native core and TrollStore-ready IPA
         working-directory: SwiftGate-iOS
         run: bash Scripts/build-unsigned-ipa.sh
 
+      - name: Run simulator regression tests
+        timeout-minutes: 30
+        working-directory: SwiftGate-iOS
+        run: |
+          SIMULATOR_UDID="$(python3 - <<'PY'
+          import json
+          import subprocess
+
+          devices = json.loads(
+              subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "-j"])
+          )["devices"]
+          for runtime in sorted(devices, reverse=True):
+              for device in devices[runtime]:
+                  if device.get("isAvailable") and device.get("name", "").startswith("iPhone"):
+                      print(device["udid"])
+                      raise SystemExit(0)
+          raise SystemExit("No available iPhone simulator")
+          PY
+          )"
+          xcrun simctl boot "$SIMULATOR_UDID" 2>/dev/null || true
+          xcrun simctl bootstatus "$SIMULATOR_UDID" -b
+          xcodebuild \
+            -project SwiftGateiOS.xcodeproj \
+            -scheme SwiftGate \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -derivedDataPath .build/simulator-tests \
+            -clonedSourcePackagesDirPath .build/ipa/SourcePackages \
+            -disableAutomaticPackageResolution \
+            -parallel-testing-enabled NO \
+            CODE_SIGNING_ALLOWED=NO \
+            test
+
       - name: Verify TrollStore package
         working-directory: SwiftGate-iOS
         run: |
           IPA=.build/artifacts/SwiftGate-TrollStore.ipa
+          shasum -a 256 -c "$IPA.sha256"
           VERIFY=.build/trollstore-verify
           mkdir -p "$VERIFY"
           unzip -q "$IPA" -d "$VERIFY"
