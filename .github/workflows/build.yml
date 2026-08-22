@@ -32,33 +32,43 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Extract verified SwiftGate 0.2.5 source
+      - name: Extract verified SwiftGate 0.2.6 source
         run: |
-          unzip -tq SwiftGate-iOS-0.2.5-TrollStore-CI-r9.zip
-          unzip -q SwiftGate-iOS-0.2.5-TrollStore-CI-r9.zip -d SwiftGate-iOS
+          unzip -tq SwiftGate-iOS-0.2.6-TrollStore-CI-r10.zip
+          unzip -q SwiftGate-iOS-0.2.6-TrollStore-CI-r10.zip -d SwiftGate-iOS
           cd SwiftGate-iOS
           test "$(find . -type f | wc -l | tr -d ' ')" = "60"
           test ! -d .git
           test ! -d .build
           test ! -d Frameworks/Libbox.xcframework
           ! find . -type f \( -name '*.ipa' -o -name '*.mobileprovision' \) -print -quit | grep -q .
-          grep -q 'MARKETING_VERSION: 0.2.5' project.yml
-          grep -q 'CURRENT_PROJECT_VERSION: 6' project.yml
+          grep -q 'MARKETING_VERSION: 0.2.6' project.yml
+          grep -q 'CURRENT_PROJECT_VERSION: 7' project.yml
           grep -q 'IPHONEOS_DEPLOYMENT_TARGET=15.0' Scripts/build-unsigned-ipa.sh
           grep -q 'OTHER_LDFLAGS=.*-lresolv.*SystemConfiguration' Scripts/build-unsigned-ipa.sh
           grep -q '"default_domain_resolver"' Services/RuntimeConfigBuilder.swift
           grep -q '"server": "bootstrap"' Services/RuntimeConfigBuilder.swift
-          grep -q '"strategy": "ipv4_only"' Services/RuntimeConfigBuilder.swift
+          grep -q '"strategy": "prefer_ipv4"' Services/RuntimeConfigBuilder.swift
+          ! grep -q '"strategy": "ipv4_only"' Services/RuntimeConfigBuilder.swift
           grep -q '"dns_mode": "hijack"' Services/RuntimeConfigBuilder.swift
           grep -q '"dns_address": \["172.19.0.2", "fdfe:dcba:9876::2"\]' Services/RuntimeConfigBuilder.swift
-          grep -q '"mtu": 1400' Services/RuntimeConfigBuilder.swift
+          grep -q '"mtu": 1500' Services/RuntimeConfigBuilder.swift
+          ! grep -q '"mtu": 1400' Services/RuntimeConfigBuilder.swift
           grep -q '"stack": "system"' Services/RuntimeConfigBuilder.swift
           grep -q '"strict_route": false' Services/RuntimeConfigBuilder.swift
           ! grep -q '"route_exclude_address"' Services/RuntimeConfigBuilder.swift
           grep -q 'tunnelProtocol.excludeLocalNetworks = false' Services/TunnelManager.swift
           grep -q 'testTunnelRoute' Services/LatencyService.swift
+          grep -q 'testStableCurrentTunnel' Services/LatencyService.swift
+          grep -q 'testTunnelDNS' Services/LatencyService.swift
+          grep -Fq 'using: .udp' Services/LatencyService.swift
+          grep -Fq 'connection.send(content: query' Services/LatencyService.swift
+          grep -Fq 'connection.receiveMessage' Services/LatencyService.swift
+          grep -q 'isValidDNSResponse' Services/LatencyService.swift
           grep -q 'tunnelNetworkAvailable' App/AppModel.swift
           grep -q 'runtimeGeneration' App/AppModel.swift
+          grep -q 'endpointProbeGeneration' App/AppModel.swift
+          grep -q 'canTestNodeEndpoints' App/AppModel.swift
           grep -q 'fallbackAttemptedGeneration' App/AppModel.swift
           grep -q 'canFallbackToCompatibleDNS' Services/RuntimeConfigBuilder.swift
           grep -q 'reloadSessionWhenReady' Services/TunnelManager.swift
@@ -70,6 +80,9 @@ jobs:
           grep -q 'testDNSFallbackRollbackReconstructsTheOriginalRuntimeExactly' Tests/RuntimeNetworkContractTests.swift
           grep -q 'RuntimeNetworkContractTests' Tests/RuntimeNetworkContractTests.swift
           grep -q 'testDNSHijackAndResolverReferencesFormACompleteChain' Tests/RuntimeNetworkContractTests.swift
+          grep -q 'testGlobalModeSkipsSniffAndRoutesPrivateNetworksDirectly' Tests/RuntimeNetworkContractTests.swift
+          grep -q 'testStableTunnelLatencyUsesMedianInsteadOfColdFirstSample' Tests/SwiftGateCoreTests.swift
+          grep -q 'testTunnelDNSProbeValidatesTransactionAndResponseCodes' Tests/SwiftGateCoreTests.swift
           grep -q 'testVMessMKCPShareIsRejectedWithActionableCoreMessage' Tests/SwiftGateCoreTests.swift
           grep -q 'testVMessWebSocketShareMapsPinnedCoreFields' Tests/SwiftGateCoreTests.swift
           grep -q 'testVMessCipherWhitelistMatchesPinnedCore' Tests/SwiftGateCoreTests.swift
@@ -82,7 +95,7 @@ jobs:
           grep -q 'default_domain_resolver' Tests/SwiftGateCoreTests.swift
           grep -q 'sing-box check' Scripts/build-unsigned-ipa.sh
           grep -q 'sing-box-apple-app-group-fallback.patch' Scripts/prepare-core.sh
-          grep -Fq 'XCTAssertTrue(runtime.contains("\"mtu\":1400"))' Tests/SwiftGateCoreTests.swift
+          grep -Fq 'XCTAssertTrue(runtime.contains("\"mtu\":1500"))' Tests/SwiftGateCoreTests.swift
           grep -q 'tunnel-last-error.txt' PacketTunnelExtension/PacketTunnelProvider.swift
           grep -q 'tunnel-last-error.txt' Services/TunnelManager.swift
           grep -q 'SensitiveTextRedactor' PacketTunnelExtension/PacketTunnelProvider.swift
@@ -103,10 +116,13 @@ jobs:
           from pathlib import Path
 
           app = Path("App/AppModel.swift").read_text(encoding="utf-8")
+          latency = Path("Services/LatencyService.swift").read_text(encoding="utf-8")
           tunnel = Path("Services/TunnelManager.swift").read_text(encoding="utf-8")
           runtime = Path("Services/RuntimeConfigBuilder.swift").read_text(encoding="utf-8")
           parser = Path("Services/ShareLinkParser.swift").read_text(encoding="utf-8")
           clash = Path("Services/ClashYAMLParser.swift").read_text(encoding="utf-8")
+          core_tests = Path("Tests/SwiftGateCoreTests.swift").read_text(encoding="utf-8")
+          network_tests = Path("Tests/RuntimeNetworkContractTests.swift").read_text(encoding="utf-8")
 
           for fixture_name, outbound_type in (
               ("vless-ws-runtime.json", "vless"),
@@ -115,9 +131,26 @@ jobs:
               fixture = json.loads(
                   Path("Tests/Fixtures", fixture_name).read_text(encoding="utf-8")
               )
-              actions = [rule.get("action") for rule in fixture["route"]["rules"][:2]]
-              assert actions == ["sniff", "hijack-dns"], \
-                  f"{fixture_name} must sniff before protocol-based DNS hijack"
+              rules = fixture["route"]["rules"]
+              assert rules[0].get("action") == "hijack-dns" \
+                  and rules[0].get("port") == 53 \
+                  and "protocol" not in rules[0], \
+                  f"{fixture_name} must hijack destination port 53 without sniffing it first"
+              assert rules[1].get("ip_is_private") is True \
+                  and rules[1].get("action") == "route" \
+                  and rules[1].get("outbound") == "direct", \
+                  f"{fixture_name} must route private/LAN traffic directly before sniffing"
+              assert rules[2].get("action") == "sniff", \
+                  f"{fixture_name} must sniff only after DNS and private-network fast paths"
+              assert fixture["dns"]["strategy"] == "prefer_ipv4", \
+                  f"{fixture_name} must permit IPv6 fallback while preferring IPv4"
+              assert fixture["route"]["default_domain_resolver"]["strategy"] == "prefer_ipv4", \
+                  f"{fixture_name} resolver strategy must match runtime DNS"
+              tun = next(
+                  inbound for inbound in fixture["inbounds"]
+                  if inbound.get("type") == "tun"
+              )
+              assert tun["mtu"] == 1500, f"{fixture_name} must use the native 1500-byte MTU"
               proxy = next(
                   outbound for outbound in fixture["outbounds"]
                   if outbound.get("type") == outbound_type
@@ -128,16 +161,43 @@ jobs:
                   f"{fixture_name} must exercise TLS"
 
           sniff_rule = 'let sniffRule: [String: Any] = ["action": "sniff"]'
-          dns_rule = 'let dnsRule: [String: Any] = ["protocol": "dns", "action": "hijack-dns"]'
+          dns_rule = 'let dnsRule: [String: Any] = ["port": 53, "action": "hijack-dns"]'
+          private_rule = '["ip_is_private": true, "action": "route", "outbound": "direct"]'
           assert sniff_rule in runtime and dns_rule in runtime, "runtime lacks sniff/DNS hijack rules"
-          assert runtime.index(sniff_rule) < runtime.index(dns_rule), \
-              "sniff must be declared before protocol-based DNS hijack"
-          assert "routeRules = [sniffRule, dnsRule]" in runtime, \
-              "direct mode must sniff before hijacking DNS"
-          assert runtime.count("                sniffRule,\n                dnsRule,") == 2, \
-              "global and rule modes must sniff before hijacking DNS"
-          assert "[dnsRule, sniffRule]" not in runtime, \
-              "no route mode may hijack protocol=dns before sniffing"
+          assert '["protocol": "dns", "action": "hijack-dns"]' not in runtime, \
+              "runtime must not require protocol sniffing before DNS hijack"
+
+          direct_mode = runtime[runtime.index("case .direct:"):runtime.index("case .global:")]
+          global_mode = runtime[runtime.index("case .global:"):runtime.index("case .rule:")]
+          rule_mode = runtime[runtime.index("case .rule:"):runtime.index("var dnsServers")]
+          assert "routeRules = [dnsRule]" in direct_mode and "sniffRule" not in direct_mode, \
+              "direct mode must use only the destination-port DNS fast path"
+          assert "dnsRule" in global_mode and private_rule in global_mode \
+              and "sniffRule" not in global_mode, \
+              "global mode must skip sniffing and preserve the private-network fast path"
+          assert global_mode.index("dnsRule") < global_mode.index(private_rule), \
+              "global mode must hijack DNS before private-address routing"
+          for token in ("dnsRule", private_rule, "sniffRule"):
+              assert token in rule_mode, f"rule mode lacks {token}"
+          assert rule_mode.index("dnsRule") < rule_mode.index(private_rule) \
+              < rule_mode.index("sniffRule"), \
+              "rule mode must order port-53 hijack, private DIRECT, then sniff"
+          assert '"strategy": "prefer_ipv4"' in runtime and '"strategy": "ipv4_only"' not in runtime
+          assert '"mtu": 1500' in runtime and '"mtu": 1400' not in runtime
+
+          dns_probe = latency[
+              latency.index("private func measureDNS"):latency.index("static func dnsQuery")
+          ]
+          for contract in (
+              "using: .udp",
+              "connection.send(content: query",
+              "connection.receiveMessage",
+              "Self.isValidDNSResponse",
+          ):
+              assert contract in dns_probe, f"real UDP DNS probe lacks {contract}"
+          assert "testTunnelDNSProbeValidatesTransactionAndResponseCodes" in core_tests
+          assert "testStableTunnelLatencyUsesMedianInsteadOfColdFirstSample" in core_tests
+          assert "testGlobalModeSkipsSniffAndRoutesPrivateNetworksDirectly" in network_tests
 
           mkcp_case = 'case "kcp", "mkcp":'
           assert mkcp_case in parser, "mKCP parser branch is missing"
@@ -170,23 +230,66 @@ jobs:
               "Clash compatibility validation must happen before a node is returned for saving"
 
           verify_start = app.index("private func verifyConnectedTunnel")
-          verify_end = app.index("private func buildRuntime", verify_start)
+          verify_end = app.index("private func verifyHTTPS", verify_start)
           verify = app[verify_start:verify_end]
-          one_shot_guard = "fallbackAttemptedGeneration != verificationGeneration"
-          mark_attempt = "fallbackAttemptedGeneration = verificationGeneration"
+          for contract in (
+              "latency.testTunnelRoute",
+              "latency.testTunnelDNS",
+              "await recoverDNS(for: verificationGeneration)",
+              "await verifyHTTPS(",
+          ):
+              assert contract in verify, f"connected tunnel verification lacks {contract}"
+          assert verify.index("latency.testTunnelRoute") < verify.index("latency.testTunnelDNS") \
+              < verify.index("await verifyHTTPS("), \
+              "verification must prove route, real DNS, then full HTTPS"
+
+          https_start = app.index("private func verifyHTTPS")
+          https_end = app.index("private func recoverDNS", https_start)
+          https_verify = app[https_start:https_end]
+          assert "testStableCurrentTunnel" in https_verify, \
+              "HTTPS verification must report stable full-chain latency"
+          for forbidden in ("recoverDNS", "tunnel.reload", "rollbackCompatibleDNSIfNeeded"):
+              assert forbidden not in https_verify, \
+                  f"HTTPS failure must not trigger DNS mutation through {forbidden}"
+
+          recover_start = app.index("private func recoverDNS")
+          recover_end = app.index("private func buildRuntime", recover_start)
+          recover = app[recover_start:recover_end]
+          one_shot_guard = "fallbackAttemptedGeneration != generation"
+          mark_attempt = "fallbackAttemptedGeneration = generation"
           fallback_reload = "try await tunnel.reload(runtimeConfiguration: fallbackRuntime)"
           rollback_state = "fallbackRollbackState = ("
-          rollback_call = "await rollbackCompatibleDNSIfNeeded(for: verificationGeneration)"
-          assert one_shot_guard in verify, "DNS fallback lacks a per-generation one-shot guard"
-          assert verify.count(mark_attempt) == 1, "fallback attempt must be marked exactly once"
-          assert verify.index(one_shot_guard) < verify.index(mark_attempt) < verify.index(fallback_reload), \
+          rollback_call = "await rollbackCompatibleDNSIfNeeded(for: generation)"
+          assert one_shot_guard in recover, "DNS fallback lacks a per-generation one-shot guard"
+          assert recover.count(mark_attempt) == 1, "fallback attempt must be marked exactly once"
+          assert recover.index(one_shot_guard) < recover.index(mark_attempt) < recover.index(fallback_reload), \
               "fallback must be guarded and marked before the provider reload"
-          assert "let previousRuntime" in verify, "fallback lacks a reconstructable rollback runtime"
-          assert rollback_state in verify, "fallback does not persist its rollback state"
-          assert verify.index(rollback_state) < verify.index("activeDNSProfile = .proxiedHTTPS") \
-              < verify.index(fallback_reload), "rollback state must be armed before enabling fallback DNS"
-          assert verify.count(rollback_call) >= 2, \
-              "route and HTTPS failures must both call the compatible-DNS rollback helper"
+          assert "let previousRuntime" in recover, "fallback lacks a reconstructable rollback runtime"
+          assert rollback_state in recover, "fallback does not persist its rollback state"
+          assert recover.index(rollback_state) < recover.index("activeDNSProfile = .proxiedHTTPS") \
+              < recover.index(fallback_reload), "rollback state must be armed before enabling fallback DNS"
+          assert recover.index(fallback_reload) < recover.index("latency.testTunnelDNS") \
+              < recover.index("await verifyHTTPS"), \
+              "fallback must pass a real DNS transaction before HTTPS verification"
+          assert recover.count(rollback_call) >= 2, \
+              "failed compatibility DNS attempts must consume their rollback state"
+
+          can_test_start = app.index("var canTestNodeEndpoints")
+          can_test_end = app.index("    init(", can_test_start)
+          can_test = app[can_test_start:can_test_end]
+          assert "case .disconnected, .invalid, .unavailable:" in can_test
+          assert "return true" in can_test and "return false" in can_test
+          assert app.count("endpointProbeGeneration &+= 1") >= 2, \
+              "endpoint probe generation must advance on tunnel and runtime changes"
+          single_probe = app[app.index("func testLatency"):app.index("func testAllLatencies")]
+          batch_probe = app[app.index("func testAllLatencies"):app.index("func importTextContent")]
+          for label, probe in (("single", single_probe), ("batch", batch_probe)):
+              assert "guard canTestNodeEndpoints" in probe, \
+                  f"{label} endpoint probe must refuse active-VPN measurements"
+              assert "let probeGeneration = endpointProbeGeneration" in probe, \
+                  f"{label} endpoint probe must capture its generation"
+              assert "probeGeneration == endpointProbeGeneration" in probe, \
+                  f"{label} endpoint probe must discard stale results"
 
           rollback_start = app.index("private func rollbackCompatibleDNSIfNeeded")
           rollback_end = app.index("func selectNode", rollback_start)
@@ -270,6 +373,10 @@ jobs:
           EXT="$APP/PlugIns/PacketTunnel.appex"
           test "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP/Info.plist")" = "15.0"
           test "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$EXT/Info.plist")" = "15.0"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")" = "0.2.6"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$EXT/Info.plist")" = "0.2.6"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")" = "7"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$EXT/Info.plist")" = "7"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")" = "com.swiftgate.ios"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$EXT/Info.plist")" = "com.swiftgate.ios.PacketTunnel"
           test "$(/usr/libexec/PlistBuddy -c 'Print :BasePackageIdentifier' "$EXT/Info.plist")" = "com.swiftgate.ios"
